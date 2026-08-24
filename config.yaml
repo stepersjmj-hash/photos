@@ -7,4 +7,4 @@ jpeg_quality: 90
 blur_threshold: 100     # Laplacian variance 임계값 (이하이면 blur 판정)
 ear_threshold: 0.18     # EAR 임계값 (이하이면 눈 감음 판정)
 keep_originals: true    # 원본은 항상 originals/ 로 이동 보관 (삭제 금지 원칙상 false 여도 삭제하지 않음)
-strip_gps_exif: true    # 블로그 업로드용 GPS 위치정보 제거
+strip_gps_exif: false   # GPS 포함 EXIF 전부 유지 (true 로 바꾸면 위치정보 제거)

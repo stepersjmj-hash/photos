@@ -1,0 +1,10 @@
+# 사진 자동 분류 설정
+# watch_folder 를 null 로 두면 실행 시 실제 바탕화면 경로를 찾아
+# <바탕화면>/Photos 를 사용한다 (OneDrive 리다이렉트 대응).
+watch_folder: null
+max_long_edge: 3840
+jpeg_quality: 90
+blur_threshold: 100     # Laplacian variance 임계값 (이하이면 blur 판정)
+ear_threshold: 0.18     # EAR 임계값 (이하이면 눈 감음 판정)
+keep_originals: true    # 원본은 항상 originals/ 로 이동 보관 (삭제 금지 원칙상 false 여도 삭제하지 않음)
+strip_gps_exif: true    # 블로그 업로드용 GPS 위치정보 제거

@@ -34,6 +34,9 @@ python photo_sorter.py --config <경로>   # 다른 config 사용
 - Laplacian variance 는 이미지 크기에 따라 값이 달라지므로 측정 패치를
   긴 축 512px로 정규화해서 임계값 일관성 유지
 - HEIC 는 `pillow-heif` 로 읽고 출력은 JPEG 로 변환
+- EXIF 촬영정보(촬영일시·노출·렌즈·MakerNote 등)는 결과물에 그대로 보존됨
+  (`exif.tobytes()` 가 Exif 하위 IFD까지 직렬화). GPS만 설정에 따라 제거.
+  ICC 색상 프로파일도 `save(icc_profile=...)` 로 보존 — 빼먹으면 Adobe RGB 사진 색이 틀어짐
 - `keep_originals: false` 여도 삭제 금지 원칙상 원본은 originals/ 에 보관됨
 
 ## 남은 작업

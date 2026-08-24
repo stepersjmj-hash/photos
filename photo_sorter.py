@@ -237,6 +237,10 @@ class PhotoProcessor:
         out_name = src.with_suffix(".jpg").name if ext == ".heic" else src.name
         dest = unique_path(self.watch / category / out_name)
         save_kwargs = {"exif": exif.tobytes()} if exif else {}
+        # ICC 색상 프로파일 보존 (Adobe RGB 등 색공간 유지)
+        icc = img.info.get("icc_profile")
+        if icc:
+            save_kwargs["icc_profile"] = icc
         if dest.suffix.lower() in (".jpg", ".jpeg"):
             img.convert("RGB").save(dest, "JPEG",
                                     quality=self.cfg["jpeg_quality"], **save_kwargs)

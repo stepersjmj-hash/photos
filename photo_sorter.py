@@ -73,7 +73,7 @@ def load_config(config_path: Path) -> dict:
         "blur_threshold": 100,
         "ear_threshold": 0.18,
         "keep_originals": True,
-        "strip_gps_exif": True,
+        "strip_gps_exif": False,
     }
     for k, v in defaults.items():
         cfg.setdefault(k, v)

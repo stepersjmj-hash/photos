@@ -323,8 +323,20 @@ class PhotoProcessor:
             img.save(dest, **save_kwargs)
 
         # 원본은 항상 originals/ 로 이동 보관 — 어떤 경우에도 삭제하지 않는다
+        # 복사 프로그램·백신이 잠깐 잠글 수 있어 재시도, 사라졌으면 보관 생략
         orig_dest = unique_path(self.watch / "originals" / src.name)
-        shutil.move(str(src), str(orig_dest))
+        for attempt in range(5):
+            try:
+                shutil.move(str(src), str(orig_dest))
+                break
+            except FileNotFoundError:
+                log.warning("%s: 원본이 사라져 보관 생략 (다른 프로그램이 이동?)", src.name)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    log.error("%s: 원본이 잠겨 있어 originals/ 보관 실패 — 루트에 남음", src.name)
+                else:
+                    time.sleep(2)
 
         log.info("%s → %s/  (blur=%.1f[%s], faces=%d[%s], min_EAR=%s)",
                  src.name, category, blur_value, blur_mode, len(faces), stage,

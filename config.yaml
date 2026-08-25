@@ -4,7 +4,11 @@
 watch_folder: null
 max_long_edge: 3840
 jpeg_quality: 90
-blur_threshold: 100     # Laplacian variance 임계값 (이하이면 blur 판정)
-ear_threshold: 0.18     # EAR 임계값 (이하이면 눈 감음 판정)
+# 블러 임계값 (Laplacian variance, 이하이면 blur 판정) — 측정 모드별로 분리.
+# 실측 근거: 선명한 얼굴 최소 12.9 / 중앙측정 선명 최소 209, 흐림 최대 33.3
+blur_threshold_face: 8      # 얼굴 검출 시 (얼굴 크롭 기준)
+blur_threshold_center: 120  # 얼굴 미검출 시 (중앙 60% 기준)
+# EAR 임계값 (이하이면 눈 감음 판정). 실측: 감은 눈 0.135~0.153, 뜬 눈 최소 0.201
+ear_threshold: 0.17
 keep_originals: true    # 원본은 항상 originals/ 로 이동 보관 (삭제 금지 원칙상 false 여도 삭제하지 않음)
 strip_gps_exif: false   # GPS 포함 EXIF 전부 유지 (true 로 바꾸면 위치정보 제거)

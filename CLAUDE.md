@@ -26,12 +26,19 @@ python photo_sorter.py --config <경로>   # 다른 config 사용
 - pythonw 는 stdout 이 없으므로 setup_logging/print 에 `sys.stdout is not None` 가드 필요 (적용됨)
 
 ## 판별 로직 요약
-- 블러: 얼굴 영역(없으면 중앙 60%)을 긴 축 512px로 정규화 후 Laplacian variance.
-  `blur_threshold`(기본 100) 이하이면 blur 판정. 여러 얼굴이면 최댓값 사용.
-- 눈 감김: MediaPipe Face Mesh EAR(세로/가로). 양쪽 눈 평균이 `ear_threshold`(기본 0.18)
-  이하인 얼굴이 한 명이라도 있으면 eyes_closed. 얼굴 미검출 시 건너뜀.
+- 얼굴 검출 3단계 체인: FaceMesh(1280px) → Haar(1600px, minNeighbors=4) →
+  ±90도 회전 후 재시도. 찾은 얼굴은 크롭을 512px 이상으로 확대해
+  refine_landmarks=True 로 정밀 재측정 (EAR·선명도 모두 여기서).
+- 블러: 얼굴 있으면 얼굴 크롭 선명도 최댓값 vs `blur_threshold_face`(8),
+  없으면 중앙 60% vs `blur_threshold_center`(120). 측정 패치는 긴 축 512px 정규화.
+  얼굴 크롭은 피부 위주라 선명해도 값이 낮음 — 두 모드 임계값 절대 통합 금지.
+- 눈 감김: 표준 6점 EAR(세로 2쌍 평균/가로). `ear_threshold`(0.17) 이하 한 명이라도
+  있으면 eyes_closed. 얼굴 미검출 시 건너뜀.
 - 판정 우선순위: blur → eyes_closed → ok
-- 로그(`<watch_folder>/photo_sorter.log`)에 blur값·EAR값이 남으므로 이를 보고 임계값 튜닝
+- 로그(`<watch_folder>/photo_sorter.log`)에 blur값[모드]·검출단계·EAR 기록됨
+- 2026-08-25 실사진 34장 튜닝 결과: 31/34, 오탐(선명→blur) 0.
+  실측 분포 — 감은 눈 EAR 0.135~0.153 / 뜬 눈 0.201~0.494,
+  선명 얼굴 blur 12.9~85.6 / 중앙측정 선명 209~708, 흐림 9.6~33.3
 
 ## 함정 및 해결책
 - **MediaPipe 1.x 는 레거시 `mp.solutions.face_mesh` API가 제거됨** —
@@ -46,6 +53,13 @@ python photo_sorter.py --config <경로>   # 다른 config 사용
   (`strip_gps_exif: true` 로 바꾸면 위치정보만 제거).
   ICC 색상 프로파일도 `save(icc_profile=...)` 로 보존 — 빼먹으면 Adobe RGB 사진 색이 틀어짐
 - `keep_originals: false` 여도 삭제 금지 원칙상 원본은 originals/ 에 보관됨
+- **FaceMesh 기본 검출은 아이 사진(작은 얼굴·전신 샷·누운 얼굴·꼭 감고 웃는 눈)을
+  절반 가까이 놓침** — Haar 폴백과 회전 재시도가 필수. Haar 오탐은 크롭에서
+  mesh 재검출 실패로 걸러짐. 작은 얼굴 EAR 은 크롭 확대 없이 재면
+  '뜬 눈' 쪽으로 뭉개져서 감김 판별이 안 됨.
 
-## 남은 작업
-- 샘플 사진 20~30장으로 blur_threshold / ear_threshold 튜닝 (개발 순서 4단계)
+## 알려진 한계 (2026-08-25 튜닝 기준)
+- 내리깐 눈(장난감 보는 아이 등)과 옆으로 누운 얼굴은 랜드마크가 '뜬 눈'으로
+  읽어 eyes_closed 를 놓칠 수 있음 (ok 로 감 — 안전한 방향)
+- 유리 너머 촬영(반사 겹침)은 창틀 등 선명한 에지 때문에 중앙측정 blur 를 놓침
+- 선글라스 낀 얼굴은 EAR 무의미 (실측에서는 오탐 없었음)

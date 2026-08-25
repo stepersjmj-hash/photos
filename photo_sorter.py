@@ -43,9 +43,9 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic"}
 CATEGORIES = ("ok", "blur", "eyes_closed", "originals")
 MEASURE_LONG_EDGE = 512  # 선명도 측정 전 패치를 이 크기로 정규화 (임계값 일관성)
 
-# MediaPipe Face Mesh 랜드마크 인덱스 (좌/우 눈)
-LEFT_EYE = {"top": 386, "bottom": 374, "left": 362, "right": 263}
-RIGHT_EYE = {"top": 159, "bottom": 145, "left": 33, "right": 133}
+# MediaPipe Face Mesh 눈 랜드마크 (표준 6점 EAR: 세로 2쌍 / 가로 1쌍)
+LEFT_EYE = {"v": [(385, 380), (387, 373)], "h": (362, 263)}
+RIGHT_EYE = {"v": [(160, 144), (158, 153)], "h": (33, 133)}
 
 GPS_IFD_TAG = 0x8825
 
@@ -70,8 +70,9 @@ def load_config(config_path: Path) -> dict:
         "watch_folder": None,
         "max_long_edge": 3840,
         "jpeg_quality": 90,
-        "blur_threshold": 100,
-        "ear_threshold": 0.18,
+        "blur_threshold_face": 8,
+        "blur_threshold_center": 120,
+        "ear_threshold": 0.17,
         "keep_originals": True,
         "strip_gps_exif": False,
     }
@@ -136,39 +137,101 @@ def wait_until_stable(path: Path, interval: float = 1.0, checks: int = 2) -> boo
 # ---------------------------------------------------------------- 판별 로직
 
 class FaceAnalyzer:
-    """MediaPipe Face Mesh 로 얼굴 bbox + EAR 추출."""
+    """3단계 검출 체인으로 얼굴을 찾고 크롭 정밀 측정으로 EAR·선명도 추출.
+
+    체인: FaceMesh(전체) → Haar(작은 얼굴) → ±90도 회전 재시도.
+    아이 사진은 얼굴이 작거나(전신 샷) 누워서 회전된 경우가 많아
+    FaceMesh 기본 검출만으로는 절반 가까이 놓친다.
+    찾은 얼굴은 크롭을 512px 로 확대 후 refine_landmarks 로 재측정 —
+    작은 얼굴을 원본 크기로 재면 EAR 이 '뜬 눈' 쪽으로 뭉개진다.
+    """
 
     def __init__(self):
-        self._mesh = mp.solutions.face_mesh.FaceMesh(
+        self._coarse = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=True, max_num_faces=5,
-            min_detection_confidence=0.5)
+            min_detection_confidence=0.4)
+        self._fine = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=True, max_num_faces=1, refine_landmarks=True,
+            min_detection_confidence=0.3)
+        self._haar = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
-    def analyze(self, rgb: np.ndarray) -> list[dict]:
-        """얼굴별 {bbox: (x0,y0,x1,y1) px, ear: float} 리스트 반환."""
+    def _coarse_boxes(self, rgb: np.ndarray) -> list[tuple]:
         h, w = rgb.shape[:2]
-        # 대형 이미지는 랜드마크 검출용으로만 축소 (좌표는 정규화되어 무관)
         scale = 1280 / max(h, w)
-        det_img = cv2.resize(rgb, (int(w * scale), int(h * scale))) if scale < 1 else rgb
-        result = self._mesh.process(det_img)
-        faces = []
-        if not result.multi_face_landmarks:
-            return faces
-        for lms in result.multi_face_landmarks:
-            xs = [p.x for p in lms.landmark]
-            ys = [p.y for p in lms.landmark]
-            x0, x1 = max(0, int(min(xs) * w)), min(w, int(max(xs) * w))
-            y0, y1 = max(0, int(min(ys) * h)), min(h, int(max(ys) * h))
-            ears = []
-            for eye in (LEFT_EYE, RIGHT_EYE):
-                top, bot = lms.landmark[eye["top"]], lms.landmark[eye["bottom"]]
-                lft, rgt = lms.landmark[eye["left"]], lms.landmark[eye["right"]]
-                vert = np.hypot((top.x - bot.x) * w, (top.y - bot.y) * h)
-                horiz = np.hypot((lft.x - rgt.x) * w, (lft.y - rgt.y) * h)
-                if horiz > 0:
-                    ears.append(vert / horiz)
-            ear = float(np.mean(ears)) if ears else None
-            faces.append({"bbox": (x0, y0, x1, y1), "ear": ear})
-        return faces
+        det = np.ascontiguousarray(
+            cv2.resize(rgb, (int(w * scale), int(h * scale))) if scale < 1 else rgb)
+        res = self._coarse.process(det)
+        boxes = []
+        if res.multi_face_landmarks:
+            for lms in res.multi_face_landmarks:
+                xs = [p.x for p in lms.landmark]
+                ys = [p.y for p in lms.landmark]
+                boxes.append((int(min(xs) * w), int(min(ys) * h),
+                              int(max(xs) * w), int(max(ys) * h)))
+        return boxes
+
+    def _haar_boxes(self, rgb: np.ndarray) -> list[tuple]:
+        h, w = rgb.shape[:2]
+        scale = 1600 / max(h, w)
+        small = cv2.resize(rgb, (int(w * scale), int(h * scale))) if scale < 1 else rgb
+        gray = cv2.equalizeHist(cv2.cvtColor(small, cv2.COLOR_RGB2GRAY))
+        inv = (1 / scale) if scale < 1 else 1
+        # minNeighbors=3 은 실측에서 오탐(뜬 눈을 감음 판정) 경계였음 — 4 유지
+        found = self._haar.detectMultiScale(gray, scaleFactor=1.08,
+                                            minNeighbors=4, minSize=(30, 30))
+        return [(int(bx * inv), int(by * inv),
+                 int((bx + bw) * inv), int((by + bh) * inv))
+                for (bx, by, bw, bh) in sorted(found, key=lambda b: -b[2] * b[3])[:5]]
+
+    def _refine(self, rgb: np.ndarray, box: tuple) -> dict | None:
+        """bbox 주변 크롭에서 정밀 mesh → {ear, blur}. mesh 실패 시 None (Haar 오탐 걸러짐)."""
+        h, w = rgb.shape[:2]
+        x0, y0, x1, y1 = box
+        bw, bh = x1 - x0, y1 - y0
+        if bw < 24 or bh < 24:
+            return None
+        cx0 = max(0, int(x0 - bw * 0.4))
+        cy0 = max(0, int(y0 - bh * 0.4))
+        cx1 = min(w, int(x1 + bw * 0.4))
+        cy1 = min(h, int(y1 + bh * 0.4))
+        crop = np.ascontiguousarray(rgb[cy0:cy1, cx0:cx1])
+        ch, cw = crop.shape[:2]
+        if max(ch, cw) < 512:
+            s = 512 / max(ch, cw)
+            crop = np.ascontiguousarray(cv2.resize(
+                crop, (int(cw * s), int(ch * s)), interpolation=cv2.INTER_CUBIC))
+            ch, cw = crop.shape[:2]
+        res = self._fine.process(crop)
+        if not res.multi_face_landmarks:
+            return None
+        lms = res.multi_face_landmarks[0].landmark
+        ears = []
+        for eye in (LEFT_EYE, RIGHT_EYE):
+            ha, hb = lms[eye["h"][0]], lms[eye["h"][1]]
+            horiz = np.hypot((ha.x - hb.x) * cw, (ha.y - hb.y) * ch)
+            if horiz <= 0:
+                continue
+            gaps = [np.hypot((lms[t].x - lms[b].x) * cw, (lms[t].y - lms[b].y) * ch)
+                    for t, b in eye["v"]]
+            ears.append(float(np.mean(gaps)) / horiz)
+        blur = sharpness(cv2.cvtColor(
+            np.ascontiguousarray(rgb[y0:y1, x0:x1]), cv2.COLOR_RGB2GRAY))
+        return {"ear": float(np.mean(ears)) if ears else None, "blur": blur}
+
+    def analyze(self, rgb: np.ndarray) -> tuple[list[dict], str]:
+        """얼굴별 {ear, blur} 리스트와 검출 단계 이름 반환."""
+        stages = [("mesh", rgb, self._coarse_boxes),
+                  ("haar", rgb, self._haar_boxes)]
+        for k, name in ((1, "rot90"), (3, "rot270")):
+            rot = np.ascontiguousarray(np.rot90(rgb, k))
+            stages.append((f"{name}/mesh", rot, self._coarse_boxes))
+            stages.append((f"{name}/haar", rot, self._haar_boxes))
+        for name, img, get_boxes in stages:
+            faces = [f for b in get_boxes(img) if (f := self._refine(img, b))]
+            if faces:
+                return faces, name
+        return [], "none"
 
 
 def sharpness(gray_patch: np.ndarray) -> float:
@@ -180,18 +243,10 @@ def sharpness(gray_patch: np.ndarray) -> float:
     return float(cv2.Laplacian(gray_patch, cv2.CV_64F).var())
 
 
-def measure_blur(rgb: np.ndarray, faces: list[dict]) -> float:
-    """얼굴이 있으면 얼굴 영역 중 최댓값, 없으면 중앙 60% 영역의 선명도."""
+def center_blur(rgb: np.ndarray) -> float:
+    """얼굴 미검출 시 중앙 60% 영역의 선명도."""
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     h, w = gray.shape
-    if faces:
-        values = []
-        for f in faces:
-            x0, y0, x1, y1 = f["bbox"]
-            if x1 - x0 >= 16 and y1 - y0 >= 16:
-                values.append(sharpness(gray[y0:y1, x0:x1]))
-        if values:
-            return max(values)
     my, mx = int(h * 0.2), int(w * 0.2)
     return sharpness(gray[my:h - my, mx:w - mx])
 
@@ -231,12 +286,21 @@ class PhotoProcessor:
         rgb = np.asarray(img.convert("RGB"))
 
         # 2단계: 블러 판별 / 3단계: 눈 감김 판별
-        faces = self.analyzer.analyze(rgb)
-        blur_value = measure_blur(rgb, faces)
+        # 얼굴/중앙 측정값은 스케일이 달라 임계값을 분리한다
+        # (얼굴 크롭은 피부 위주라 선명해도 값이 낮게 나옴)
+        faces, stage = self.analyzer.analyze(rgb)
+        if faces:
+            blur_value = max(f["blur"] for f in faces)
+            blur_thresh = self.cfg["blur_threshold_face"]
+            blur_mode = "face"
+        else:
+            blur_value = center_blur(rgb)
+            blur_thresh = self.cfg["blur_threshold_center"]
+            blur_mode = "center"
         ears = [f["ear"] for f in faces if f["ear"] is not None]
         min_ear = min(ears) if ears else None
 
-        if blur_value <= self.cfg["blur_threshold"]:
+        if blur_value <= blur_thresh:
             category = "blur"
         elif min_ear is not None and min_ear <= self.cfg["ear_threshold"]:
             category = "eyes_closed"
@@ -262,8 +326,8 @@ class PhotoProcessor:
         orig_dest = unique_path(self.watch / "originals" / src.name)
         shutil.move(str(src), str(orig_dest))
 
-        log.info("%s → %s/  (blur=%.1f, faces=%d, min_EAR=%s)",
-                 src.name, category, blur_value, len(faces),
+        log.info("%s → %s/  (blur=%.1f[%s], faces=%d[%s], min_EAR=%s)",
+                 src.name, category, blur_value, blur_mode, len(faces), stage,
                  f"{min_ear:.3f}" if min_ear is not None else "-")
 
 

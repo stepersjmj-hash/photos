@@ -71,6 +71,7 @@ def load_config(config_path: Path) -> dict:
         "max_long_edge": 3840,
         "jpeg_quality": 90,
         "blur_threshold_face": 8,
+        "blur_threshold_person": 30,
         "blur_threshold_center": 120,
         "ear_threshold": 0.17,
         "keep_originals": True,
@@ -251,6 +252,36 @@ def center_blur(rgb: np.ndarray) -> float:
     return sharpness(gray[my:h - my, mx:w - mx])
 
 
+class PersonSharpness:
+    """인물 세그멘테이션 영역의 선명도 (얼굴 측정의 보조 지표).
+
+    배경만 선명하고 피사체(아이)가 흐린 사진을 잡는다.
+    마스크 경계의 인물/배경 에지가 값을 오염시키지 않게 침식 후 측정.
+    """
+
+    def __init__(self):
+        self._seg = mp.solutions.selfie_segmentation.SelfieSegmentation(
+            model_selection=1)
+
+    def measure(self, rgb: np.ndarray) -> float | None:
+        h, w = rgb.shape[:2]
+        scale = 1280 / max(h, w)
+        img = np.ascontiguousarray(
+            cv2.resize(rgb, (int(w * scale), int(h * scale))) if scale < 1 else rgb)
+        res = self._seg.process(img)
+        if res.segmentation_mask is None:
+            return None
+        mask = res.segmentation_mask > 0.5
+        if mask.mean() < 0.02:  # 인물이 거의 없으면 무의미
+            return None
+        mask_e = cv2.erode(mask.astype(np.uint8),
+                           np.ones((15, 15), np.uint8)).astype(bool)
+        if mask_e.mean() < 0.01:
+            mask_e = mask
+        lap = cv2.Laplacian(cv2.cvtColor(img, cv2.COLOR_RGB2GRAY), cv2.CV_64F)
+        return float(lap[mask_e].var())
+
+
 # ---------------------------------------------------------------- 처리 파이프라인
 
 class PhotoProcessor:
@@ -258,6 +289,7 @@ class PhotoProcessor:
         self.cfg = cfg
         self.watch = Path(cfg["watch_folder"])
         self.analyzer = FaceAnalyzer()
+        self.person = PersonSharpness()
 
     def _resize_and_clean(self, img: Image.Image) -> tuple[Image.Image, Image.Exif]:
         img = ImageOps.exif_transpose(img)
@@ -289,18 +321,22 @@ class PhotoProcessor:
         # 얼굴/중앙 측정값은 스케일이 달라 임계값을 분리한다
         # (얼굴 크롭은 피부 위주라 선명해도 값이 낮게 나옴)
         faces, stage = self.analyzer.analyze(rgb)
+        seg_value = self.person.measure(rgb)
         if faces:
             blur_value = max(f["blur"] for f in faces)
-            blur_thresh = self.cfg["blur_threshold_face"]
+            is_blur = blur_value <= self.cfg["blur_threshold_face"]
             blur_mode = "face"
         else:
             blur_value = center_blur(rgb)
-            blur_thresh = self.cfg["blur_threshold_center"]
+            is_blur = blur_value <= self.cfg["blur_threshold_center"]
             blur_mode = "center"
+        # 보조: 인물 영역이 흐리면 배경/중앙이 선명해도 blur (배경만 선명한 사진 잡음)
+        if not is_blur and seg_value is not None:
+            is_blur = seg_value <= self.cfg["blur_threshold_person"]
         ears = [f["ear"] for f in faces if f["ear"] is not None]
         min_ear = min(ears) if ears else None
 
-        if blur_value <= blur_thresh:
+        if is_blur:
             category = "blur"
         elif min_ear is not None and min_ear <= self.cfg["ear_threshold"]:
             category = "eyes_closed"
@@ -338,8 +374,10 @@ class PhotoProcessor:
                 else:
                     time.sleep(2)
 
-        log.info("%s → %s/  (blur=%.1f[%s], faces=%d[%s], min_EAR=%s)",
-                 src.name, category, blur_value, blur_mode, len(faces), stage,
+        log.info("%s → %s/  (blur=%.1f[%s], seg=%s, faces=%d[%s], min_EAR=%s)",
+                 src.name, category, blur_value, blur_mode,
+                 f"{seg_value:.1f}" if seg_value is not None else "-",
+                 len(faces), stage,
                  f"{min_ear:.3f}" if min_ear is not None else "-")
 
 

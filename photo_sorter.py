@@ -85,10 +85,21 @@ def load_config(config_path: Path) -> dict:
 def setup_logging(watch_folder: Path) -> None:
     log.setLevel(logging.INFO)
     fmt = logging.Formatter("%(asctime)s  %(levelname)s  %(message)s", "%Y-%m-%d %H:%M:%S")
-    for handler in (logging.StreamHandler(sys.stdout),
-                    logging.FileHandler(watch_folder / "photo_sorter.log", encoding="utf-8")):
+    handlers = [logging.FileHandler(watch_folder / "photo_sorter.log", encoding="utf-8")]
+    if sys.stdout is not None:  # pythonw(콘솔 없는 실행)에서는 stdout 이 없음
+        handlers.append(logging.StreamHandler(sys.stdout))
+    for handler in handlers:
         handler.setFormatter(fmt)
         log.addHandler(handler)
+
+
+def already_running() -> bool:
+    """중복 실행 방지 (자동 시작 + 수동 실행이 겹치면 이중 처리되므로)."""
+    if sys.platform == "win32":
+        ERROR_ALREADY_EXISTS = 183
+        ctypes.windll.kernel32.CreateMutexW(None, False, "photo_sorter_single_instance")
+        return ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS
+    return False
 
 
 def unique_path(dest: Path) -> Path:
@@ -288,6 +299,11 @@ def main() -> None:
                         help="기존 파일만 일괄 처리하고 종료")
     parser.add_argument("--config", default=None, help="config.yaml 경로")
     args = parser.parse_args()
+
+    if already_running():
+        if sys.stdout is not None:
+            print("photo_sorter 가 이미 실행 중입니다. 종료합니다.")
+        return
 
     config_path = Path(args.config) if args.config else Path(__file__).parent / "config.yaml"
     cfg = load_config(config_path)

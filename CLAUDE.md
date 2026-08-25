@@ -18,6 +18,13 @@ python photo_sorter.py --once     # 기존 파일만 처리하고 종료 (테스
 python photo_sorter.py --config <경로>   # 다른 config 사용
 ```
 
+## 자동 시작 (이 PC에 설정됨)
+- 시작 프로그램 바로가기: `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Photo Sorter.lnk`
+  → `pythonw.exe photo_sorter.py` (콘솔 창 없이 백그라운드 실행)
+- 로그인하면 자동 실행됨. 해제하려면 위 .lnk 삭제. 즉시 종료는 작업관리자에서 pythonw 종료
+- Windows named mutex 로 중복 실행 방지 — 수동으로 또 실행하면 바로 종료됨
+- pythonw 는 stdout 이 없으므로 setup_logging/print 에 `sys.stdout is not None` 가드 필요 (적용됨)
+
 ## 판별 로직 요약
 - 블러: 얼굴 영역(없으면 중앙 60%)을 긴 축 512px로 정규화 후 Laplacian variance.
   `blur_threshold`(기본 100) 이하이면 blur 판정. 여러 얼굴이면 최댓값 사용.

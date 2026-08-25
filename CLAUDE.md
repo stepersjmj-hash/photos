@@ -23,6 +23,10 @@ python photo_sorter.py --config <경로>   # 다른 config 사용
   → `pythonw.exe photo_sorter.py` (콘솔 창 없이 백그라운드 실행)
 - 로그인하면 자동 실행됨. 해제하려면 위 .lnk 삭제. 즉시 종료는 작업관리자에서 pythonw 종료
 - Windows named mutex 로 중복 실행 방지 — 수동으로 또 실행하면 바로 종료됨
+- **주의: 코드를 수정하면 python.exe/pythonw.exe 전부 확인 후 재시작할 것.**
+  구버전 코드가 메모리에 남은 프로세스가 살아 있으면 (특히 mutex 도입 전 버전)
+  두 인스턴스가 같은 파일을 경쟁 처리해 중복본·오분류가 대량 발생함 (2026-08-25 사고).
+  확인: `Get-CimInstance Win32_Process -Filter "Name='python.exe' or Name='pythonw.exe'"`
 - pythonw 는 stdout 이 없으므로 setup_logging/print 에 `sys.stdout is not None` 가드 필요 (적용됨)
 
 ## 판별 로직 요약

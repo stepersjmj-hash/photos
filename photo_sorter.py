@@ -40,7 +40,7 @@ except ImportError:
 import mediapipe as mp
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic"}
-CATEGORIES = ("ok", "blur", "eyes_closed", "originals")
+CATEGORIES = ("ok", "blur", "eyes_closed", "unknown", "originals")
 MEASURE_LONG_EDGE = 512  # 선명도 측정 전 패치를 이 크기로 정규화 (임계값 일관성)
 
 # MediaPipe Face Mesh 눈 랜드마크 (표준 6점 EAR: 세로 2쌍 / 가로 1쌍)
@@ -115,6 +115,25 @@ def unique_path(dest: Path) -> Path:
     raise RuntimeError(f"빈 파일명을 찾지 못함: {dest}")
 
 
+def quarantine(src: Path, watch: Path, reason: str) -> None:
+    """판별하지 못한 파일을 unknown/ 으로 이동. 삭제 금지 원칙상 이동만 한다."""
+    if not src.exists():
+        return
+    dest = unique_path(watch / "unknown" / src.name)
+    for attempt in range(5):
+        try:
+            shutil.move(str(src), str(dest))
+            log.warning("%s → unknown/  (%s)", src.name, reason)
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if attempt == 4:
+                log.error("%s: 파일이 잠겨 unknown/ 이동 실패 — 루트에 남음", src.name)
+            else:
+                time.sleep(2)
+
+
 def wait_until_stable(path: Path, interval: float = 1.0, checks: int = 2) -> bool:
     """파일 크기가 interval 간격으로 checks회 연속 동일할 때까지 대기."""
     prev = -1
@@ -168,8 +187,10 @@ class FaceAnalyzer:
             for lms in res.multi_face_landmarks:
                 xs = [p.x for p in lms.landmark]
                 ys = [p.y for p in lms.landmark]
-                boxes.append((int(min(xs) * w), int(min(ys) * h),
-                              int(max(xs) * w), int(max(ys) * h)))
+                # 프레임 밖으로 걸친 얼굴은 랜드마크가 0~1 범위를 벗어나므로
+                # 이미지 경계로 clamp (음수 좌표는 numpy 슬라이스를 빈 배열로 만듦)
+                boxes.append((max(0, int(min(xs) * w)), max(0, int(min(ys) * h)),
+                              min(w, int(max(xs) * w)), min(h, int(max(ys) * h))))
         return boxes
 
     def _haar_boxes(self, rgb: np.ndarray) -> list[tuple]:
@@ -216,8 +237,11 @@ class FaceAnalyzer:
             gaps = [np.hypot((lms[t].x - lms[b].x) * cw, (lms[t].y - lms[b].y) * ch)
                     for t, b in eye["v"]]
             ears.append(float(np.mean(gaps)) / horiz)
+        fx0, fy0, fx1, fy1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+        if fx1 - fx0 < 8 or fy1 - fy0 < 8:
+            return None
         blur = sharpness(cv2.cvtColor(
-            np.ascontiguousarray(rgb[y0:y1, x0:x1]), cv2.COLOR_RGB2GRAY))
+            np.ascontiguousarray(rgb[fy0:fy1, fx0:fx1]), cv2.COLOR_RGB2GRAY))
         return {"ear": float(np.mean(ears)) if ears else None, "blur": blur}
 
     def analyze(self, rgb: np.ndarray) -> tuple[list[dict], str]:
@@ -313,6 +337,7 @@ class PhotoProcessor:
                 img, exif = self._resize_and_clean(im)
         except Exception as e:
             log.error("%s: 이미지 열기 실패 (%s)", src.name, e)
+            quarantine(src, self.watch, f"이미지 열기 실패: {e}")
             return
 
         rgb = np.asarray(img.convert("RGB"))
@@ -397,6 +422,7 @@ class NewImageHandler(FileSystemEventHandler):
             self.processor.process(path)
         except Exception:
             log.exception("%s: 처리 중 오류", path.name)
+            quarantine(path, self.watch, "처리 중 오류")
 
     def on_created(self, event):
         if not event.is_directory:
@@ -442,6 +468,7 @@ def main() -> None:
                 processor.process(p)
             except Exception:
                 log.exception("%s: 처리 중 오류", p.name)
+                quarantine(p, watch, "처리 중 오류")
 
     if args.once:
         log.info("--once 모드: 종료")

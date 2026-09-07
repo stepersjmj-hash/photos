@@ -2,6 +2,7 @@
 
 바탕화면 `Photos` 폴더를 감시해 새 사진을 자동으로 리사이즈(긴 축 3840px)하고
 블러/눈 감김을 판별해 `ok/` `blur/` `eyes_closed/` 하위 폴더로 분류하는 프로그램.
+판별에 실패한 파일은 `unknown/` 으로 격리한다.
 원본은 `originals/` 에 보관하며 어떤 경우에도 파일을 삭제하지 않는다.
 
 ## 파일 구성
@@ -42,6 +43,10 @@ python photo_sorter.py --config <경로>   # 다른 config 사용
 - 눈 감김: 표준 6점 EAR(세로 2쌍 평균/가로). `ear_threshold`(0.17) 이하 한 명이라도
   있으면 eyes_closed. 얼굴 미검출 시 건너뜀.
 - 판정 우선순위: blur → eyes_closed → ok
+- 판별 실패(이미지 열기 실패·처리 중 예외)는 `quarantine()` 이 원본을 `unknown/` 으로
+  이동하고 WARNING 로그를 남긴다. 감시 폴더 루트에 파일이 쌓이지 않게 하는 안전망 —
+  예외가 나도 루트에 남으면 매 실행마다 같은 오류를 반복한다.
+  단 '파일 크기 안정 대기 실패'는 복사 중일 수 있으므로 격리하지 않고 루트에 둔다
 - 로그(`<watch_folder>/photo_sorter.log`)에 blur값[모드]·검출단계·EAR 기록됨
 - 2026-08-25 실사진 161장 그리드 서치 결과: 오류 12 (blur 놓침 6, 억울 blur 1,
   감음 놓침 5). 실측 분포 — 감은 눈 EAR ~0.163 / 뜬 눈 0.191~,
@@ -61,6 +66,12 @@ python photo_sorter.py --config <경로>   # 다른 config 사용
   (`strip_gps_exif: true` 로 바꾸면 위치정보만 제거).
   ICC 색상 프로파일도 `save(icc_profile=...)` 로 보존 — 빼먹으면 Adobe RGB 사진 색이 틀어짐
 - `keep_originals: false` 여도 삭제 금지 원칙상 원본은 originals/ 에 보관됨
+- **MediaPipe FaceMesh 는 프레임 밖으로 걸친 얼굴에 0~1 범위를 벗어난 랜드마크
+  좌표를 돌려준다** — 그대로 픽셀 박스로 쓰면 음수 좌표가 생기고, numpy 는 이를
+  '끝에서 N번째'로 해석해 슬라이스가 빈 배열이 된다 → `cv2.cvtColor` assertion 실패로
+  그 사진의 처리 전체가 중단됨 (2026-09-07, 12장이 루트에 방치된 사고). `_coarse_boxes`
+  에서 이미지 경계로 clamp 하고 `_refine` 의 blur 슬라이스에도 방어 가드를 뒀다.
+  얼굴 박스를 새로 만들 때는 항상 경계 clamp 여부를 확인할 것
 - **FaceMesh 기본 검출은 아이 사진(작은 얼굴·전신 샷·누운 얼굴·꼭 감고 웃는 눈)을
   절반 가까이 놓침** — Haar 폴백과 회전 재시도가 필수. Haar 오탐은 크롭에서
   mesh 재검출 실패로 걸러짐. 작은 얼굴 EAR 은 크롭 확대 없이 재면

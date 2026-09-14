@@ -78,7 +78,7 @@ pythonw.exe "C:\Users\<사용자명>\Desktop\mj\photos\photo_sorter.py"
 | `max_long_edge` | `3840` | 리사이즈할 긴 축 픽셀 (이보다 작은 사진은 그대로) |
 | `jpeg_quality` | `90` | JPEG 저장 품질 |
 | `blur_threshold_face` | `8` | 얼굴이 검출된 사진의 흐림 기준 |
-| `blur_threshold_person` | `30` | 인물 영역 흐림 보조 기준 (배경만 선명한 사진 잡기) |
+| `blur_threshold_person` | `100` | 인물 영역 흐림 보조 기준 (배경만 선명한 사진 잡기) |
 | `blur_threshold_center` | `120` | 얼굴·인물 모두 없을 때 중앙부 흐림 기준 |
 | `ear_threshold` | `0.17` | 눈 감김 기준 (높일수록 더 많이 "감았다"고 판정) |
 | `strip_gps_exif` | `false` | `true` 로 하면 사진에서 GPS 위치정보 제거 |

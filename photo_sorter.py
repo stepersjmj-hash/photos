@@ -17,9 +17,12 @@ import argparse
 import ctypes
 import ctypes.wintypes
 import logging
+import os
 import shutil
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -78,11 +81,16 @@ def load_config(config_path: Path) -> dict:
         "ear_threshold": 0.17,
         "keep_originals": True,
         "strip_gps_exif": False,
+        "batch_workers": 0,  # 0 이면 코어 수로 자동 (시작 일괄처리 전용)
     }
     for k, v in defaults.items():
         cfg.setdefault(k, v)
     if not cfg["watch_folder"]:
         cfg["watch_folder"] = str(get_desktop_path() / "Photos")
+    if not cfg["batch_workers"]:
+        # 실측(12코어)에서 6스레드가 최적, 8은 오히려 느려짐. 장당 메모리가
+        # 크므로(33MP 원본 ~250MB) 코어의 절반, 최대 6으로 제한한다
+        cfg["batch_workers"] = max(1, min(6, (os.cpu_count() or 2) // 2))
     return cfg
 
 
@@ -323,11 +331,30 @@ class PersonSharpness:
 # ---------------------------------------------------------------- 처리 파이프라인
 
 class PhotoProcessor:
+    """사진 한 장을 리사이즈·판별·분류한다. 여러 스레드에서 동시 호출해도 안전.
+
+    MediaPipe 객체(FaceMesh·SelfieSegmentation)는 스레드 안전하지 않으므로
+    스레드마다 따로 만든다. 출력 파일명 선점만 락으로 보호하면 된다 —
+    서로 다른 원본이 같은 출력 이름을 갖는 경우(a.heic 와 a.jpg)가 있다.
+    """
+
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.watch = Path(cfg["watch_folder"])
-        self.analyzer = FaceAnalyzer()
-        self.person = PersonSharpness()
+        self._local = threading.local()
+        self._name_lock = threading.Lock()
+
+    @property
+    def analyzer(self) -> FaceAnalyzer:
+        if not hasattr(self._local, "analyzer"):
+            self._local.analyzer = FaceAnalyzer()
+        return self._local.analyzer
+
+    @property
+    def person(self) -> PersonSharpness:
+        if not hasattr(self._local, "person"):
+            self._local.person = PersonSharpness()
+        return self._local.person
 
     def _resize_and_clean(self, img: Image.Image) -> tuple[Image.Image, Image.Exif]:
         # exif_transpose 는 회전이 필요 없어도 사본을 만든다 (33MP 기준 0.09초) —
@@ -392,21 +419,24 @@ class PhotoProcessor:
         # 저장: HEIC 는 JPEG 로 변환, 나머지는 원래 확장자 유지
         ext = src.suffix.lower()
         out_name = src.with_suffix(".jpg").name if ext == ".heic" else src.name
-        dest = unique_path(self.watch / category / out_name)
         save_kwargs = {"exif": exif.tobytes()} if exif else {}
         # ICC 색상 프로파일 보존 (Adobe RGB 등 색공간 유지)
         icc = img.info.get("icc_profile")
         if icc:
             save_kwargs["icc_profile"] = icc
-        if dest.suffix.lower() in (".jpg", ".jpeg"):
-            out = img if img.mode == "RGB" else img.convert("RGB")
-            out.save(dest, "JPEG", quality=self.cfg["jpeg_quality"], **save_kwargs)
-        else:
-            img.save(dest, **save_kwargs)
+        # 이름 선점부터 저장까지 한 번에 — 다른 스레드가 같은 이름을 고르지 않게
+        with self._name_lock:
+            dest = unique_path(self.watch / category / out_name)
+            if dest.suffix.lower() in (".jpg", ".jpeg"):
+                out = img if img.mode == "RGB" else img.convert("RGB")
+                out.save(dest, "JPEG", quality=self.cfg["jpeg_quality"], **save_kwargs)
+            else:
+                img.save(dest, **save_kwargs)
 
         # 원본은 항상 originals/ 로 이동 보관 — 어떤 경우에도 삭제하지 않는다
         # 복사 프로그램·백신이 잠깐 잠글 수 있어 재시도, 사라졌으면 보관 생략
-        orig_dest = unique_path(self.watch / "originals" / src.name)
+        with self._name_lock:
+            orig_dest = unique_path(self.watch / "originals" / src.name)
         for attempt in range(5):
             try:
                 shutil.move(str(src), str(orig_dest))
@@ -429,6 +459,15 @@ class PhotoProcessor:
 
 # ---------------------------------------------------------------- 감시 (1단계)
 
+def process_one(processor: PhotoProcessor, path: Path) -> None:
+    """한 장 처리 + 실패 시 격리. 감시 경로와 일괄처리가 공유한다."""
+    try:
+        processor.process(path)
+    except Exception:
+        log.exception("%s: 처리 중 오류", path.name)
+        quarantine(path, processor.watch, "처리 중 오류")
+
+
 class NewImageHandler(FileSystemEventHandler):
     def __init__(self, processor: PhotoProcessor):
         self.processor = processor
@@ -439,11 +478,9 @@ class NewImageHandler(FileSystemEventHandler):
         # 하위 분류 폴더 안의 파일(우리가 만든 결과물)은 무시
         if path.parent != self.watch or path.suffix.lower() not in IMAGE_EXTS:
             return
-        try:
-            self.processor.process(path)
-        except Exception:
-            log.exception("%s: 처리 중 오류", path.name)
-            quarantine(path, self.watch, "처리 중 오류")
+        # 감시 중에는 사진이 한 장씩 들어오므로 순차 처리 — 같은 파일을
+        # 두 번 집는 경쟁을 만들지 않는다 (2026-08-25 이중 처리 사고 참고)
+        process_one(self.processor, path)
 
     def on_created(self, event):
         if not event.is_directory:
@@ -483,13 +520,19 @@ def main() -> None:
     pending = sorted(p for p in watch.iterdir()
                      if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
     if pending:
-        log.info("기존 미처리 파일 %d개 일괄 처리 시작", len(pending))
-        for p in pending:
-            try:
-                processor.process(p)
-            except Exception:
-                log.exception("%s: 처리 중 오류", p.name)
-                quarantine(p, watch, "처리 중 오류")
+        workers = min(cfg["batch_workers"], len(pending))
+        log.info("기존 미처리 파일 %d개 일괄 처리 시작 (스레드 %d)",
+                 len(pending), workers)
+        started = time.perf_counter()
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(lambda p: process_one(processor, p), pending))
+        else:
+            for p in pending:
+                process_one(processor, p)
+        elapsed = time.perf_counter() - started
+        log.info("일괄 처리 완료: %d장 %.1f초 (장당 %.2f초)",
+                 len(pending), elapsed, elapsed / len(pending))
 
     if args.once:
         log.info("--once 모드: 종료")

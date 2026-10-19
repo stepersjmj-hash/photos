@@ -102,6 +102,19 @@ python photo_sorter.py --config <경로>   # 다른 config 사용
   seg 가 13% 낮아지고 14장 중 2장은 검출 결과까지 바뀐다 — 임계값 재튜닝 필수
 
 ## 함정 및 해결책
+- **감시(observer)는 반드시 일괄 스캔보다 먼저 켠다** — 반대 순서면 스캔 시점
+  이후 ~ 감시 시작 사이에 들어온 사진이 양쪽 모두에서 누락되어 루트에 영원히
+  남는다. 일괄 처리에 수 초~수 분이 걸리므로 창이 실제로 크다
+  (2026-10-19 사고: 51장 일괄처리 11초 사이에 복사된 29장이 통째로 누락.
+  최초 커밋부터 있던 버그이고, 병렬화 전에는 창이 100초로 더 컸다).
+  양쪽에 걸리는 파일은 `PhotoProcessor.claim()` 이 걸러내고, 이미 옮겨간
+  파일은 `process()` 앞머리의 `src.exists()` 로 조용히 통과시킨다
+- **루트에 남은 파일의 원인을 볼 때 mtime 을 믿지 말 것** — 복사는 원본의
+  수정시각을 보존하므로 '언제 폴더에 들어왔는지'는 생성시각(Windows
+  CreationTime)으로 봐야 한다. 2026-10-19 사고에서 mtime 은 하루 전이었지만
+  실제 유입은 11초 창 안이었다. 확인:
+  `Get-ChildItem <폴더>\*.JPG | Select Name,CreationTime,LastWriteTime`
+
 - **MediaPipe 1.x 는 레거시 `mp.solutions.face_mesh` API가 제거됨** —
   반드시 `mediapipe==0.10.21` 사용 (requirements.txt 에 고정됨). Python 3.10 호환.
 - 바탕화면 경로는 OneDrive 리다이렉트 가능성 때문에 하드코딩 금지 —

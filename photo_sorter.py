@@ -343,6 +343,25 @@ class PhotoProcessor:
         self.watch = Path(cfg["watch_folder"])
         self._local = threading.local()
         self._name_lock = threading.Lock()
+        self._claimed: set[str] = set()
+        self._claim_lock = threading.Lock()
+
+    def claim(self, path: Path) -> bool:
+        """이 파일의 처리권을 잡는다. 이미 다른 스레드가 잡았으면 False.
+
+        감시를 일괄 스캔보다 먼저 켜기 때문에, 그 사이에 들어온 파일은
+        pending 목록과 watchdog 이벤트 양쪽에 걸릴 수 있다.
+        """
+        key = str(path).lower()
+        with self._claim_lock:
+            if key in self._claimed:
+                return False
+            self._claimed.add(key)
+            return True
+
+    def release(self, path: Path) -> None:
+        with self._claim_lock:
+            self._claimed.discard(str(path).lower())
 
     @property
     def analyzer(self) -> FaceAnalyzer:
@@ -372,6 +391,8 @@ class PhotoProcessor:
         return img, exif
 
     def process(self, src: Path) -> None:
+        if not src.exists():
+            return  # 다른 경로(일괄처리/감시)에서 이미 처리해 옮겨갔다
         if not wait_until_stable(src):
             log.warning("%s: 파일 크기가 안정되지 않아 건너뜀", src.name)
             return
@@ -461,11 +482,15 @@ class PhotoProcessor:
 
 def process_one(processor: PhotoProcessor, path: Path) -> None:
     """한 장 처리 + 실패 시 격리. 감시 경로와 일괄처리가 공유한다."""
+    if not processor.claim(path):
+        return
     try:
         processor.process(path)
     except Exception:
         log.exception("%s: 처리 중 오류", path.name)
         quarantine(path, processor.watch, "처리 중 오류")
+    finally:
+        processor.release(path)
 
 
 class NewImageHandler(FileSystemEventHandler):
@@ -516,6 +541,17 @@ def main() -> None:
 
     processor = PhotoProcessor(cfg)
 
+    # 감시를 일괄 스캔보다 먼저 켠다 — 반대로 하면 스캔 시점 이후 ~ 감시 시작
+    # 사이에 들어온 사진이 양쪽 모두에서 누락된다. 일괄 처리에 수 초~수 분이
+    # 걸리므로 그 창이 실제로 꽤 크다 (2026-10-19, 29장이 11초 창에 빠진 사고).
+    # 양쪽에 걸리는 파일은 PhotoProcessor.claim() 이 걸러낸다.
+    observer = None
+    if not args.once:
+        observer = Observer()
+        observer.schedule(NewImageHandler(processor), str(watch), recursive=False)
+        observer.start()
+        log.info("폴더 감시 시작 (Ctrl+C 로 종료)")
+
     # 시작 시 미처리 파일 일괄 처리
     pending = sorted(p for p in watch.iterdir()
                      if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
@@ -538,10 +574,6 @@ def main() -> None:
         log.info("--once 모드: 종료")
         return
 
-    observer = Observer()
-    observer.schedule(NewImageHandler(processor), str(watch), recursive=False)
-    observer.start()
-    log.info("폴더 감시 시작 (Ctrl+C 로 종료)")
     try:
         while True:
             time.sleep(1)
